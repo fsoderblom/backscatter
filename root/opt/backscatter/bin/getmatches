@@ -1,0 +1,60 @@
+#!/usr/bin/perl
+#
+#
+# When       Who            What
+# 2009-10-21 fredrik@xpd.se created.
+
+use strict;
+use warnings;
+use DBI;
+use File::Temp qw/ tmpnam /;
+use File::Copy;
+use Getopt::Long;
+use Date::Manip;
+
+
+my $verbose = 0;
+my $debug = 0;
+my $lines = 0;
+my $showhidden;
+my $usage = "Usage: " . $0 . " [-d|--debug] [-v|--verbose] [--lines=nnn] [--show-hidden] pattern";
+
+GetOptions("d+"=>\$debug, "debug+"=>\$debug, "v"=>\$verbose, "verbose"=>\$verbose,
+	 "--lines=i"=>\$lines, "--show-hidden"=>\$showhidden);
+my $ip=shift;
+$verbose=1 if $debug;
+if (!$ip) {
+	print $usage . "\n";
+	exit;
+}
+
+my $dbh = DBI->connect('dbi:mysql:backscatter','backscatter','p5nA4UAb59JbwBF') or die "Connection Error: $DBI::errstr\n";
+my $sql = "SELECT proto,srcip,srcport,dstip,dstport,reason,timestamp FROM matches WHERE (srcip LIKE ? OR dstip LIKE ?) AND reason LIKE ? ORDER BY timestamp DESC";
+$sql = $sql . " LIMIT $lines" if $lines;
+my $sth = $dbh->prepare($sql) or die "Couldn't prepare statement: " . $dbh->errstr;
+$sth->execute($ip, $ip, ($showhidden ? "%" : "")) or die "Couldn't execute statement: " . $sth->errstr;
+while (my @data = $sth->fetchrow_array()) {
+	my $proto = $data[0];
+	my $srcip = $data[1];
+	my $srcport = $data[2];
+	my $dstip = $data[3];
+	my $dstport = $data[4];
+	my $reason = $data[5];
+	my $timestamp = UnixDate($data[6], "%C");
+	print "$timestamp: $proto $srcip:$srcport -> $dstip:$dstport";
+	print " (whitelisted: $reason)" if $reason;
+	print "\n";
+}
+
+die "nonzero exit of $?" if $?;
+
+if ($sth->rows == 0) {
+	print "No match on \"$ip\".\n" if $verbose;
+	exit 1;
+} else {
+	print "found " . $sth->rows . " match/es for \"$ip\".\n" if $verbose;
+}
+
+$sth->finish();
+$dbh->disconnect();
+exit 0;

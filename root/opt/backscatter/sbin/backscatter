@@ -1,0 +1,327 @@
+#!/usr/bin/perl
+#
+# backscatter - monitor backscatter and pick out source ip on possibly offending hosts.
+#
+# backscatter created "semaphores" in /var/spool/backscatter, each semaphore is named
+# according to the offending source ip. report_backscatter regulary reads /var/spool/backscatter
+# and for each found file it greps out the 10 last entries from the logfile and mails a report
+# to a (hopefully) concerned sysadmin.
+#
+# When       Who            What
+# 2020-05-18 fredrik@xpd.se Added 13.96.0.0/13 to MSFT ranges.
+# 2019-07-24 fredrik@xpd.se Added Net::CIDR support.
+# 2019-01-18 fredrik@xpd.se Added whitelisting for Cloudflare.
+# 2018-09-17 fredrik@xpd.se Added even more whitelisting for Akamai and MSFT.
+# 2018-08-02 fredrik@xpd.se Added more whitelisting for Akamai and MSFT.
+# 2017-10-09 fredrik@xpd.se Rewrote regexp to also match new syslog format from recent IOS releases.
+# 2016-04-14 fredrik@xpd.se Ported to Red Hat, rewrote regexp to match rsyslog more fine grained time stamps.
+# 2010-06-28 fredrik@xpd.se revamped for hashes-of-hashes implementation.
+# 2009-07-21 fredrik@xpd.se save matches and whitelisting to SQL (for Afterglow graphs)
+#                           implemented saving and restoring of state (SQL)
+#                           implemented interrupt handling
+# 2009-05-18 fredrik@xpd.se implement dampening.
+# 2009-04-02 fredrik@xpd.se added temporary whitelisting of AD servers,
+#                           also created foundation for afterglow integration.
+# 2007-07-26 fredrik@xpd.se extended whitelist with 554/tcp and 1755/tcp.
+# 2006-11-26 fredrik@xpd.se created.
+#
+
+use strict;
+use warnings;
+use File::Tail;
+use DBI;
+use Data::Dumper;
+use IO::Handle;
+use Net::CIDR;
+
+my $verbose = 1;
+
+my %hash;
+my %alert;
+
+my $line;
+my $logtype;
+my $proto;
+my $srcip;
+my $srcport;
+my $dstip;
+my $dstport;
+
+my $dbh;
+my $sql;
+my $hits;
+my $reason;
+
+my $logfile = '/var/log/iptables.log';
+my $path = '/var/spool/backscatter/';
+
+#
+# Start of functions
+#
+
+# notify report tool on new host to examine
+sub report {
+	my $rhash = \%hash;
+	print "REPORT: " . $srcip . " (" . (keys %{$rhash->{$srcip}}) . " hits)\n" if ($verbose >= 2);
+	open(FH, ">> $path/$srcip");
+	close(FH);
+}
+
+sub get_state {
+	my @data;
+	my $counter = 0;
+	print "Restoring state - " if $verbose;
+	my $sth = $dbh->prepare("SELECT srcip, dstip, hits FROM state");
+	$sth->execute;
+	while (@data = $sth->fetchrow_array()) {
+		$hash{$data[0]}{$data[1]} = $data[2];
+		$counter++;
+	}
+	print "done ($counter state/s restored)\n" if $verbose;
+}
+
+sub save_state {
+	my $counter = 0;
+	if (! $dbh->ping ) {
+		$dbh = $dbh->clone() or die "cannot connect to db";
+	}
+	print "Saving state - " if $verbose;
+	my $rhash = \%hash;
+	foreach my $srcip (sort keys %$rhash) {
+	        foreach my $dstip (keys %{$rhash->{ $srcip }}) {
+			$sql = "REPLACE INTO state (srcip, dstip, hits) VALUES('" . $srcip . "', '" . $dstip . "', '" . $rhash->{ $srcip }{ $dstip } . "')";
+			$counter++;
+			$dbh->do($sql);
+			print "$sql\n" if ($verbose >= 10);
+	        }
+	}
+	print "done ($counter state/s saved)\n" if $verbose;
+}
+
+sub dump_state {
+	my $rhash = \%hash;
+	foreach my $_srcip (sort keys %$rhash) {
+		print "$_srcip: tried to reach " . (keys %{$rhash->{ $_srcip }}) . " destination/s\n";
+		foreach my $_dstip (keys %{$rhash->{ $_srcip }}) {
+			print "srcip: $_srcip dstip: $_dstip value: $rhash->{ $_srcip }{ $_dstip }\n";
+		}
+	}
+}
+
+sub periodic_save {
+	alarm 0; # disable the alarm
+	&save_state;
+	alarm 3600; # re-arm the alarm
+}
+
+sub int_handler {
+	&save_state;
+	$dbh->disconnect();
+	die "Interrupted, exiting.\n";
+}
+
+#
+# end of functions
+#
+
+#
+# Initiate DB connection
+$dbh = DBI->connect('dbi:mysql:backscatter','backscatter','p5nA4UAb59JbwBF') or die "Connection Error: $DBI::errstr\n";
+
+# Setup interrupt handlers
+%SIG = (
+	'INT' => 'int_handler',
+	'TERM' => 'int_handler',
+	'HUP' => 'save_state',
+	'ALRM' => 'periodic_save',
+	'USR1' => 'dump_state'
+);
+
+# Set up stdout and stderr for autoflush
+STDERR->autoflush(1);
+STDOUT->autoflush(1);
+
+# Restore previous state
+&get_state;
+
+# Arm the alarm
+alarm 3600;
+
+# Play the violin
+print "up and running, following $logfile\n";
+
+my $file=File::Tail->new("$logfile");
+while (defined($line=$file->read))
+{
+	# Logs are expected to look like this:
+	# 2020-06-15T14:35:02.735982+02:00 backscatter.domain.cc kernel: IN=ens666 OUT= MAC=00:50:56:82:78:93:02:00:0a:5a:0a:5a:08:00 SRC=10.44.17.113 DST=2.249.46.160 LEN=364 TOS=0x00 PREC=0x00 TTL=125 ID=17291 PROTO=UDP SPT=500 DPT=500 LEN=344
+	# parse line and pick out offending ip address
+	$line =~ /^[ -T.:0-9]{32} [._[:alnum:]-]+ kernel: (IN=ens666) OUT= MAC=[:a-f0-9]+ SRC=([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}) DST=([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}) LEN=.* PROTO=([A-Z]+) SPT=([0-9]+) DPT=([0-9]+) /;
+
+	$logtype = $1;
+	$srcip = $2;
+	$dstip = $3;
+	$proto = $4;
+	$srcport = $5;
+	$dstport = $6;
+	$reason = "";
+
+	# we only parse "IN=ens666" events, skip the others.
+	if (!$logtype) {
+		print "IGNORE (unmatched logevent): $line" if ($verbose >= 4);
+		next;
+	}
+
+	printf("%s (%s) %s %s %s %s\n", $logtype, $proto, $srcip, $srcport, $dstip, $dstport) if ($verbose >= 5);
+
+	#
+	# Filtering section
+	#
+
+	#
+	# source ip
+	#
+
+	# 10.163.0.35 that's me :)
+	if ($srcip =~ /^10\.163\.0\.35$/) {
+		$reason = "srcip/me" unless $reason;
+	}
+
+	#
+	# sourceport
+	#
+
+	# 123/UDP - NTP
+	if ($srcport =~ /^123$/) {
+		$reason = "srcport ntp" unless $reason;
+	}
+
+	# Misconfigured? internal BIP
+	if ($dstip =~ /^1\.1\.1\.10/) {
+		if ($dstport =~ /^443$/) {
+			$reason = "misconfigured internal bip" unless $reason;
+		}
+	}
+
+	#
+	# destination ip
+	#
+
+	# Akamai
+	my @akamai=("92.122.0.0/16", "92.123.0.0/16", "193.45.3.128/25", "77.67.19.0/24", "2.16.0.0/13", " 23.32.0.0/11", "23.64.0.0/14", "104.64.0.0/10");
+	if (Net::CIDR::cidrlookup($dstip, @akamai)) {
+		$reason = "dstip/akamai" unless $reason;
+	}
+
+	# Microsoft Public IP Space - https://www.microsoft.com/en-us/download/details.aspx?id=53602
+	my @msft=("13.64.0.0/11", "13.96.0.0/13", "13.104.0.0/14", "20.34.0.0/15", "20.36.0.0/14", "20.40.0.0/13", "20.128.0.0/16", "20.140.0.0/15", "20.144.0.0/14", "20.150.0.0/15", "20.160.0.0/12", "20.176.0.0/14", "20.180.0.0/14", "20.184.0.0/13", "40.64.0.0/10", "51.4.0.0/15", "51.8.0.0/16", "51.10.0.0/15", "51.12.0.0/15", "51.18.0.0/16", "51.51.0.0/16", "51.53.0.0/16", "51.103.0.0/16", "51.104.0.0/15", "51.107.0.0/16", "51.116.0.0/16", "51.120.0.0/16", "51.124.0.0/16", "51.132.0.0/16", "51.136.0.0/15", "51.138.0.0/16", "51.140.0.0/14", "51.144.0.0/15", "52.96.0.0/12", "52.112.0.0/14", "52.125.0.0/16", "52.126.0.0/15", "52.130.0.0/15", "52.132.0.0/14", "52.136.0.0/13", "52.145.0.0/16", "52.146.0.0/15", "52.148.0.0/14", "52.152.0.0/13", "52.160.0.0/11", "52.224.0.0/11", "64.4.0.0/18", "65.52.0.0/14", "66.119.144.0/20", "70.37.0.0/17", "70.37.128.0/18", "91.190.216.0/21", "94.245.64.0/18", "103.9.8.0/22", "103.25.156.0/24", "103.25.157.0/24", "103.25.158.0/23", "103.36.96.0/22", "103.255.140.0/22", "104.40.0.0/13", "104.146.0.0/15", "104.208.0.0/13", "111.221.16.0/20", "111.221.64.0/18", "129.75.0.0/16", "131.253.1.0/24", "131.253.3.0/24", "131.253.5.0/24", "131.253.6.0/24", "131.253.8.0/24", "131.253.12.0/22", "131.253.16.0/23", "131.253.18.0/24", "131.253.21.0/24", "131.253.22.0/23", "131.253.24.0/21", "131.253.32.0/20", "131.253.61.0/24", "131.253.62.0/23", "131.253.64.0/18", "131.253.128.0/17", "132.245.0.0/16", "134.170.0.0/16", "134.177.0.0/16", "137.116.0.0/15", "137.135.0.0/16", "138.91.0.0/16", "138.196.0.0/16", "139.217.0.0/16", "139.219.0.0/16", "141.251.0.0/16", "146.147.0.0/16", "147.243.0.0/16", "150.171.0.0/16", "150.242.48.0/22", "157.54.0.0/15", "157.56.0.0/14", "157.60.0.0/16", "167.220.0.0/16", "168.61.0.0/16", "168.62.0.0/15", "191.232.0.0/13", "192.32.0.0/16", "192.48.225.0/24", "192.84.159.0/24", "192.84.160.0/23", "192.100.102.0/24", "192.100.103.0/24", "192.197.157.0/24", "193.149.64.0/19", "193.221.113.0/24", "194.69.96.0/19", "194.110.197.0/24", "198.105.232.0/22", "198.200.130.0/24", "198.206.164.0/24", "199.60.28.0/24", "199.74.210.0/24", "199.103.90.0/23", "199.103.122.0/24", "199.242.32.0/20", "199.242.48.0/21", "202.89.224.0/20", "204.13.120.0/21", "204.14.180.0/22", "204.79.135.0/24", "204.79.179.0/24", "204.79.181.0/24", "204.79.188.0/24", "204.79.195.0/24", "204.79.196.0/23", "204.79.252.0/24", "204.152.18.0/23", "204.152.140.0/23", "204.231.192.0/24", "204.231.194.0/23", "204.231.197.0/24", "204.231.198.0/23", "204.231.200.0/21", "204.231.208.0/20", "204.231.236.0/24", "205.174.224.0/20", "206.138.168.0/21", "206.191.224.0/19", "207.46.0.0/16", "207.68.128.0/18", "208.68.136.0/21", "208.76.44.0/22", "208.84.0.0/21", "209.240.192.0/19", "213.199.128.0/18", "216.32.180.0/22", "216.220.208.0/20");
+	if (Net::CIDR::cidrlookup($dstip, @msft)) {
+		$reason = "dstip/msft" unless $reason;
+	}
+
+	my @root_ns=("128.63.2.53/32", "198.41.0.4/32", "199.9.14.201/32", "192.33.4.12/32", "199.7.91.13/32", "192.203.230.10/32", "192.5.5.241/32", "192.112.36.4/32", "198.97.190.53/32", "192.36.148.17/32", "193.0.14.129/32", "199.7.83.42/32", "202.12.27.33/32");
+	if (Net::CIDR::cidrlookup($dstip, @root_ns)) {
+		if ($dstport =~ /^53$/) {
+			$reason = "dstip/root nameservers and dstport/dns" unless $reason;
+		}
+	}
+
+	my @open_resolvers=("8.8.8.8/32", "8.8.4.4/32", "1.1.1.1/32", "1.0.0.1/32", "9.9.9.9/32", "149.112.112.112/32", "9.9.9.10/32", "117.50.10.10/32", "117.50.20.20/32", "149.112.112.10/32", "223.5.5.5/32", "223.6.6.6/32");
+	if (Net::CIDR::cidrlookup($dstip, @open_resolvers)) {
+		if ($dstport =~ /^53$/) {
+			$reason = "dstip/open resolvers and dstport/dns" unless $reason;
+		}
+	}
+
+	# 1.1.1.0/24 Cloudflare
+	# 104.16.0.0/12 Cloudflare
+	my @cloudflare=("104.16.0.0/12", "1.1.1.0/24");
+	if (Net::CIDR::cidrlookup($dstip, @cloudflare)) {
+		$reason = "dstip/cloudflare" unless $reason;
+	}
+
+	# 169.254.0.0/16 end node autoconfiguration
+	if ($dstip =~ /^169\.254\./) {
+		$reason = "dstip/endnode autoconfiguration" unless $reason;
+	}
+
+	# 10/8, 172.16/12 & 192.168/16 RFC1918
+	my @rfc1918=("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16");
+	if (Net::CIDR::cidrlookup($dstip, @rfc1918)) {
+		$reason = "dstip/rfc1918" unless $reason;
+	}
+
+	#
+	# destination port
+	#
+
+	# 25/TCP - SMTP
+	# 53/TCP/UDP - DNS
+	# 123/UDP - NTP
+	# 137/UDP - Netbios
+	# 554/TCP - RTSP (also used by Windows streaming media)
+	# 843/TCP - Adobe Flash Socket Policy server
+	# 1755/TCP - MMS (Windows streaming media)
+	# 1935/TCP - RTMP (Real-Time Messaging Protocol) Macromedia Flash Communication Server
+	#            http://en.wikipedia.org/wiki/Real_Time_Messaging_Protocol
+	# 5860/TCP - Racadm using PPP for Server Agent bypass
+	# 6502/UDP - Danware NetOp Remote Control
+	# (http://support.dell.com/support/edocs/software/smdrac3/RAC/en/readme/racread_4.2.txt)
+
+	#if ($dstport =~ /^123$|^137$|^554$|^843$|^1755$|^1935$|^6502$|^5860$/) {
+	#	$reason = "dstport " unless $reason;
+	#}
+
+	#
+	# srcport/dstport combination to whitelist
+	#
+	#if ($dstport =~ /^53$/) {
+	#	if ($srcport > 1024) {
+	#		$reason = "srcport/dstport/domain" unless $reason;
+	#	}
+	#}
+
+	#
+	# end of filters
+	#
+
+	# List reason (if any)
+	if ($reason) {
+		print "IGNORE ($reason): $srcip:$srcport -> $dstip:$dstport\n" if ($verbose >= 3);
+		print "$line\n" if ($verbose >= 4);
+	}
+
+	#
+	# Save log matches for Afterglow graphs.
+	#
+
+	$sql = "INSERT INTO matches (proto, srcip, srcport, dstip, dstport, reason) VALUES('" . $proto . "', '" . $srcip . "', '" . $srcport . "', '" . $dstip . "', '" . $dstport . "', '" . $reason . "')";
+	$dbh->do($sql);
+
+	next if $reason; # skip to next, if whitelisted.
+
+	if (exists $hash{$srcip}{$dstip}) {
+		$hash{$srcip}{$dstip} = $hash{$srcip}{$dstip} + 1;
+		print "CANDIDATE (known pattern, seen " . $hash{$srcip}{$dstip} . " time/s): $srcip:$srcport -> $dstip:$dstport\n" if ($verbose >= 2);
+	} else {
+		$hash{$srcip}{$dstip} = 1;
+		print "CANDIDATE (new pattern): $srcip:$srcport -> $dstip:$dstport\n" if ($verbose >= 2);
+	}
+
+	# dampening
+	my $rhash = \%hash;
+	for my $dst (10, 25, 50, 75, 150, 300, 600, 1200) {
+		next if ((keys %{$rhash->{$srcip}}) > $dst);
+		next if ((keys %{$rhash->{$srcip}}) < $dst);
+		if ((keys %{$rhash->{$srcip}}) >= $dst) {		# more than $dst destinations, time to ring the bell?
+			if (exists $alert{$srcip}) {
+				next if ($alert{$srcip} >= $dst);	# notification already dispatched?
+			}
+			$alert{$srcip} = $dst;				# remember notification level and
+			&report;					# .. dispatch a report.
+		}
+	}
+}
+
+&save_state;
+$dbh->disconnect();

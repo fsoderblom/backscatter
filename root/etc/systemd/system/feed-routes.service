@@ -1,0 +1,10 @@
+[Unit]
+Description=feed-routes
+After=network.target anyip-listener.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/backscatter/lbin/feed-routes.sh
+
+[Install]
+WantedBy=multi-user.target

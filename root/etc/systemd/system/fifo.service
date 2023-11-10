@@ -1,0 +1,15 @@
+[Unit]
+Description=fifo
+After=network.target
+
+[Service]
+Type=simple
+Restart=on-failure
+ExecStartPre=-/usr/bin/mkdir -p /var/opt/fifo
+ExecStartPre=/usr/bin/chown tcpdump:tcpdump /var/opt/fifo
+ExecStartPre=/usr/bin/chmod 755 /var/opt/fifo
+ExecStart=/opt/fifo/bin/fifo
+ExecStop=/bin/kill -TERM $MAINPID
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,59 @@
+#!/usr/bin/perl
+#
+#
+# When       Who            What
+# 2009-07-21 fredrik@xpd.se created.
+
+use strict;
+use warnings;
+use DBI;
+use File::Temp qw/ tmpnam /;
+use File::Copy;
+use Getopt::Long;
+
+my $verbose;
+my $debug;
+my $include_all;
+my $dstfile;
+my $usage = "Usage: " . $0 . " [-d|--debug] [-v|--verbose] [--file=output] [--all] pattern";
+
+GetOptions("d+"=>\$debug, "debug+"=>\$debug, "v"=>\$verbose, "verbose"=>\$verbose, "--file=s"=>\$dstfile, "--all"=>\$include_all);
+my $ip=shift;
+$verbose=1 if $debug;
+if (!$ip) {
+	print $usage . "\n";
+	exit;
+}
+
+my $tfile = tmpnam();
+
+open GLOW, "| /opt/afterglow/bin/afterglow.pl -c /opt/afterglow/etc/color.properties 2>/dev/null | /bin/neato -Tpng -o$tfile" or die "cannot pipe to Afterglow: $!\n";
+
+my $dbh = DBI->connect('dbi:mysql:backscatter','backscatter','p5nA4UAb59JbwBF') or die "Connection Error: $DBI::errstr\n";
+my $sth = $dbh->prepare('SELECT DISTINCT srcip,dstip,dstport FROM matches WHERE (srcip LIKE ? OR dstip LIKE ?) AND reason LIKE ? LIMIT 1000')
+                or die "Couldn't prepare statement: " . $dbh->errstr;
+$sth->execute($ip, $ip, ($include_all ? "%" : "")) or die "Couldn't execute statement: " . $sth->errstr;
+while (my @data = $sth->fetchrow_array()) {
+	my $srcip = $data[0];
+	my $dstip = $data[1];
+	my $dstport = $data[2];
+	print "$srcip,$dstip,$dstport\n" if $debug;
+	print GLOW "$srcip,$dstip,$dstport\n";
+}
+
+close GLOW;
+die "nonzero exit of $?" if $?;
+
+if ($sth->rows == 0) {
+	print "No match on \"$ip\".\n" if $verbose;
+	unlink $tfile;
+	exit 1;
+} else {
+	print "found " . $sth->rows . " match/es for \"$ip\".\n" if $verbose;
+	$dstfile = $ip . ".png" unless $dstfile;
+	print "$tfile -> $dstfile\n" if $debug;
+	move($tfile, $dstfile) or die "File cannot be copied: $!";
+}
+
+$sth->finish();
+$dbh->disconnect();

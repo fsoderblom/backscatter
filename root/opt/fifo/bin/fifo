@@ -1,0 +1,25 @@
+#!/bin/sh
+#
+# When       Who                What
+# 2011-03-02 fredrik@xpd.se     created.
+# 2017-06-05 fredrik@xpd.se     modified for RH 7.3
+#
+PATH=/bin:/usr/bin:/sbin:/usr/sbin
+PROG=$(basename $0)
+
+SIZE=5          # Size of each file in MiB
+NO_FILES=100    # Number of files to save, should be $SIZE * $NO_FILES <= Amount of storage
+PACKET_LEN=0    # Amount of data from each segment to save (0 = full packet)
+DATA_DIR="/var/opt/fifo"
+EXCLUDE="/opt/fifo/etc/exclude.filter"
+
+LISTEN_ON="ens666"
+
+#for IF in $LISTEN_ON
+#do
+#	/sbin/ip link set up dev $IF
+#	/sbin/ip link set promisc on dev $IF
+#done
+
+/sbin/tcpdump -i $LISTEN_ON -C ${SIZE:-25} -W ${NO_FILES:-100} -s ${PACKET_LEN:-128} -w ${DATA_DIR:-/var/opt/fifo}/fifo-pcap. -F $EXCLUDE
+exit 0

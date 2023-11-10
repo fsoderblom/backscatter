@@ -1,0 +1,213 @@
+#!/bin/bash -
+#
+# When       What		Who
+# 2006-11-28 fredrik@xpd.se	created.
+
+PATH=/usr/bin:/bin
+PROG=$(basename $0)
+
+BASE_DIR=/var/spool/backscatter
+
+MAIL_TO="user@domain.cc"
+LOG_FACILITY=daemon
+
+ALERT=1
+ALERT_FACILITY=local6
+ALERT_DIR=/u/backscatter
+OFFLINE_ALERT_DIR=/u/offline
+
+OFFLINE=0
+NAP_TIME=120
+INCLUDE_NMAP_SCAN=1
+MINUTES_PER_SCAN=60
+MAX_SCAN_PER_HOUR=300	# 3 files per scan, so 300 == 100 scans per hour
+
+CI="/usr/bin/ci"
+NMAP="/bin/nmap"
+SUDO="/usr/bin/sudo"
+PCREGREP="/usr/bin/pcregrep"
+VALID_IP_RE="^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$"
+#LOG_SOCKET="/run/systemd/journal/socket"
+
+#
+# Start of functions
+#
+
+info() # msg
+{
+	MSG="INFO: $1"
+	logger -t $PROG -p $LOG_FACILITY.warn "$MSG"
+#	logger --socket $LOG_SOCKET -t $PROG -p $LOG_FACILITY.warn "$MSG"
+	echo "$MSG"
+}
+
+error() # msg
+{
+	MSG="ERROR: $1"
+	logger -t $PROG -p $LOG_FACILITY.error "$MSG"
+	echo "$MSG"
+}
+
+emerg() # msg
+{
+	MSG="EMERGENCY: $1"
+	logger -t $PROG -p $LOG_FACILITY.emerg "$MSG"
+	echo "$MSG"
+}
+
+alert() # msg
+{
+	if [ "$ALERT" -eq "1" ]; then
+		MSG="$1"
+		logger -t $PROG -p $ALERT_FACILITY.error "ALERT:$MSG"
+		echo "ALERT: $MSG"
+	fi
+}
+
+chkIP() # IP
+{
+	OK=0
+	FIRST_OCTET=$(echo $1 | cut -f1 -d.)
+	SECOND_OCTET=$(echo $1 | cut -f2 -d.)
+
+	case $FIRST_OCTET in
+		10)	OK=1 ;;
+		192)
+			case $SECOND_OCTET in
+				168) OK=1 ;;
+			esac ;;
+		172)
+			if [ "$SECOND_OCTET" -ge "16" -a "$SECOND_OCTET" -le "31" ]; then
+				OK=1
+			fi ;;
+	esac
+	echo $OK
+}
+
+#
+# End of functions - start of main
+#
+
+cd $BASE_DIR
+info "up and running. (parsing queue every $NAP_TIME second)"
+
+while [ true ]
+do
+	if [ $(ls $BASE_DIR | $PCREGREP "$VALID_IP_RE" 2>/dev/null | wc -l) -gt 0 ]; then
+		for SRC_IP in $(ls $BASE_DIR | $PCREGREP "$VALID_IP_RE")
+		do
+			info "processing $SRC_IP"
+			echo >$BASE_DIR/$SRC_IP
+
+			# Should we scan and if so, is it in our range?
+			if [ ${INCLUDE_NMAP_SCAN:-0} -ne 0 -a $(chkIP $SRC_IP) -eq 1 ]; then
+				SCAN=0
+				if [ -f $BASE_DIR/scan/${SRC_IP}.nmap ]; then
+					# At max, one nmap scan per $MINUTES_PER_SCAN (default is 60 minutes, ie 1 hour)
+					RESCAN=$(find $BASE_DIR/scan/${SRC_IP}.nmap -type f -mmin -${MINUTES_PER_SCAN:-60} 2>/dev/null | wc -l)
+					if [ ${RESCAN:-0} -eq 0 ]; then
+						SCAN=1 # No stored scans available
+					fi
+				else
+					SCAN=1 # No stored scans available
+				fi
+
+				echo -e "Result from last nmap scan of $SRC_IP" >>$BASE_DIR/$SRC_IP
+				echo -e "================================================================================\n" >>$BASE_DIR/$SRC_IP
+				if [ ${SCAN:-0} -gt 0 ]; then
+					# rate-limit, max $MAX_SCAN_PER_HOUR (default 100) scans last hour
+					RATE=$(find $BASE_DIR/scan -type f -mmin -60 | wc -l)
+					if [ ${RATE:-0} -ge ${MAX_SCAN_PER_HOUR:-100} ]; then
+						echo "more than ${MAX_SCAN_PER_HOUR:-100} nmap scans last hour, supressing scan." >>$BASE_DIR/$SRC_IP
+					else
+						info "doing nmap scan of $SRC_IP"
+						$SUDO /opt/backscatter/bin/run_nmap $SRC_IP
+					fi
+				fi
+
+				if [ -f $BASE_DIR/scan/${SRC_IP}.nmap ]; then
+					cat $BASE_DIR/scan/${SRC_IP}.nmap >>$BASE_DIR/$SRC_IP
+				else
+					echo "ERROR: can't find previously stored scan." >>$BASE_DIR/$SRC_IP
+				fi
+
+				echo >>$BASE_DIR/$SRC_IP # add newline
+			fi
+
+			#
+			# Append last (at most 100) lines from routers log
+			#
+
+			echo -e "Last logentries regarding traffic from $SRC_IP" >>$BASE_DIR/$SRC_IP
+			echo -e "================================================================================\n" >>$BASE_DIR/$SRC_IP
+			/opt/backscatter/bin/getmatches --lines=100 $SRC_IP >>$BASE_DIR/$SRC_IP
+
+			echo -e "\n--\n/backscatter daemon at $(hostname --fqdn)" >>$BASE_DIR/$SRC_IP
+
+			#
+			# Create a visualiztion of the traffic pattern using Afterglow
+			#
+
+			TMP_FILE=$(mktemp)
+			/opt/backscatter/bin/gengraph --file=$TMP_FILE $SRC_IP
+
+			#
+			# Report it the proper way
+			#
+			NOW=$(date '+%Y%m%d-%H%M%S')
+			ALERT_REPORT="$NOW.txt"
+			ALERT_REPORT_VISUALIZATION="$NOW.png"
+
+			if [ ! -d $ALERT_DIR/$SRC_IP ]; then
+				mkdir $ALERT_DIR/$SRC_IP
+				if [ $? -gt 0 ]; then
+					error "failed to create \"$ALERT_DIR/$SRC_IP\", switching to offline mode."
+					OFFLINE=1
+				fi
+			fi
+
+			if [ "${OFFLINE:-0}" -eq 0 ]; then
+				cp $TMP_FILE $ALERT_DIR/$SRC_IP/$ALERT_REPORT_VISUALIZATION
+				cp $BASE_DIR/$SRC_IP $ALERT_DIR/$SRC_IP/$ALERT_REPORT
+				if [ $? -gt 0 ]; then
+					error "failed to create \"$ALERT_DIR/$SRC_IP/$ALERT_REPORT\", switching to offline mode."
+					OFFLINE=1
+				else
+					alert "medium:$SRC_IP"
+				fi
+			fi
+
+			#
+			# Offline mode, e.g. CIFS is unavailable
+			#
+			if [ "${OFFLINE:-0}" -gt 0 ]; then
+				mkdir $OFFLINE_ALERT_DIR/$SRC_IP
+				if [ $? -gt 0 ]; then
+					error "failed to create \"$OFFLINE_ALERT_DIR/$SRC_IP\" in offline mode."
+				fi
+
+				cp $TMP_FILE $OFFLINE_ALERT_DIR/$SRC_IP/$ALERT_REPORT_VISUALIZATION
+				cp $BASE_DIR/$SRC_IP $OFFLINE_ALERT_DIR/$SRC_IP/$ALERT_REPORT
+
+				if [ $? -gt 0 ]; then
+					emerg "failed to create \"$OFFLINE_ALERT_DIR/$SRC_IP/$ALERT_REPORT\" in offline mode, preserving file as \"/tmp/${SRC_IP}-${ALERT_REPORT}\""
+					cp $TMP_FILE /tmp/${SRC_IP}-${ALERT_REPORT_VISUALIZATION}
+					cp $BASE_DIR/$SRC_IP /tmp/${SRC_IP}-${ALERT_REPORT}
+					if [ $? -gt 0 ]; then
+						emerg "failed to save \"/tmp/${SRC_IP}-${ALERT_REPORT}\""
+					fi
+				fi
+				alert "medium:$SRC_IP (offline mode: report mailed to \"$MAIL_TO\")"
+				cat $BASE_DIR/$SRC_IP | mailx -s "[backscatter (offline mode)] suspicious traffic from $SRC_IP" $MAIL_TO
+			fi
+
+			# Be optimistic, turn off OFFLINE mode
+			OFFLINE=0
+
+			rm -f $BASE_DIR/$SRC_IP $TMP_FILE
+			info "done processing $SRC_IP"
+		done
+	fi
+	sleep $NAP_TIME
+done
+exit 0

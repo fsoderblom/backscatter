@@ -1,0 +1,19 @@
+[Unit]
+Description=Backscatter reporter
+After=backscatter.service
+Wants=backscatter.service
+
+[Service]
+User=scatter
+Group=scatter
+ExecStart=/opt/backscatter/sbin/report_backscatter
+ExecReload=/bin/kill -HUP $MAINPID
+ExecStop=/bin/kill -TERM $MAINPID
+KillMode=process
+Restart=on-failure
+RestartSec=10s
+StandardOutput=syslog
+SyslogFacility=local4
+
+[Install]
+WantedBy=multi-user.target

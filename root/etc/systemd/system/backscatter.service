@@ -1,0 +1,20 @@
+[Unit]
+Description=Backscatter collector
+After=rsyslog.service mariadb.service
+Wants=rsyslog.service
+Requires=mariadb.service
+
+[Service]
+User=scatter
+Group=scatter
+ExecStart=/opt/backscatter/sbin/backscatter
+ExecReload=/bin/kill -HUP $MAINPID
+ExecStop=/bin/kill -TERM $MAINPID
+KillMode=process
+Restart=on-failure
+RestartSec=10s
+StandardOutput=syslog
+SyslogFacility=local4
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,3 @@
+scatter         ALL = NOPASSWD: /opt/backscatter/bin/run_nmap
+scatter         ALL = NOPASSWD: /bin/nmap
+scatter         ALL = NOPASSWD: /usr/local/bin/nmap
