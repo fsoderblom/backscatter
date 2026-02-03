@@ -23,6 +23,9 @@ while True:
     c, (r_ip, r_port) = s.accept()
     l_ip, l_port = c.getsockname()
     syslog.syslog("[ ] Connection from tcp://%s:%d to tcp://%s:%d" % (r_ip, r_port, l_ip, l_port))
-    c.send(b"captured in backscatter. contact soc for more information.\n")
+    try:
+        c.send(b"captured in backscatter. contact soc for more information.\n")
+    except OSError as e:
+        syslog.syslog(f"[!] Failed to send data to {r_ip}:{r_port}: {e}")
     c.close()
 sys.exit()
