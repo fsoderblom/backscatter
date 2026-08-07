@@ -110,6 +110,13 @@ The following are optional but recommended — edit `nginx.conf` to enable them:
 - **OCSP stapling** — uncomment `ssl_stapling`, `ssl_stapling_verify`, and `resolver`, replacing `DNS1 DNS2` with your internal resolvers.
 - **HSTS** — uncomment the `Strict-Transport-Security` header once TLS is confirmed working.
 
+Once the configuration is in place, verify and enable NGINX:
+
+```bash
+nginx -t
+systemctl enable --now nginx
+```
+
 ### 9. Create directories
 
 ```bash
