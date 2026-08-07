@@ -1,110 +1,170 @@
 # Backscatter
 
-Automatically detect anomalies on a corporate internal network
+Detect anomalies on a corporate network by analyzing traffic routed to a dedicated sink host.
 
-## Pre-requisite
-A Linux server with RHEL7 (should prolly work fine with later releases too)
-Two ethernet interfaces, one for management and one to receive the traffic to be monitored
-Default route should go out thru the monitor interface
+## Prerequisites
 
-## Steps
-1. Add a user for backscatter
+- Linux server running RHEL7, RHEL8, or RHEL9
+- Two ethernet interfaces:
+  - **ens192** — management interface, used for administrative access
+  - **ens666** — monitor interface, receives all traffic to be analyzed
+- The corporate network's default route (or routes covering unallocated IP space) must point to this machine's **ens666** interface. Any traffic arriving on it has no legitimate destination and is treated as anomalous.
+- The machine's own default route must go out via **ens666**, so return traffic follows the same path. Static routes on **ens192** (see step 4) ensure that administrative traffic uses the management interface and routes symmetrically.
+
+## How it works
+
+Traffic from the corporate network with no legitimate internal destination is routed to **ens666**. `feed-routes.sh` reads the monitored CIDR ranges from `/opt/backscatter/etc/cidr-ranges.conf`, installs local kernel routes for each, and adds iptables TPROXY rules to redirect inbound TCP to `anyip-listener`. The listener completes the TCP handshake and sends a short response before closing, prompting the client to transmit its first application payload — which is captured in the PCAP.
+
+All traffic on ens666 is captured by `fifo` (tcpdump) in rotating PCAP files at `/var/opt/fifo/`. iptables logs new inbound connections to `/var/log/iptables.log`, which the `backscatter` daemon tails continuously. It whitelists known-good destinations (CDNs, Microsoft, Cloudflare, root DNS, open resolvers, etc.), records all events to the `matches` database table, and tracks the number of unique destination IPs each source has tried to reach. Alerts fire at dampening thresholds of 10, 25, 50, 75, 150, 300, 600 and 1200 unique destinations by dropping a semaphore in `/var/spool/backscatter/`.
+
+`report_backscatter` polls that spool every two minutes. For each flagged source it optionally runs an nmap scan (internal ranges only, rate-limited to one scan per hour per host), fetches the last 100 database entries, generates an Afterglow graph, and writes a timestamped report and PNG to `/u/backscatter/<srcip>/`. `/u/backscatter` is intended to be a SAN or shared volume that the SOC team can mount directly to browse reports and graphs. A `local6.error` syslog alert is emitted to `alerts.log`; the SOC can consume this by polling the file or by forwarding it to a SIEM — uncomment the `@@siem` lines in `etc/rsyslog.d/backscatter.conf` to enable syslog forwarding. If the share is unavailable the report falls back to `/u/offline/` and email.
+
+The web interface provides search and filtering of the `matches` database, Afterglow traffic maps, live tail, CSV/raw/HTML export, and a PCAP browser for downloading capture files.
+
+## Installation
+
+### 1. Create a dedicated user
+
 ```bash
 useradd -c "Backscatter user" scatter
 ```
-2. Download the latest version of nmap and compile it (optional)
-```bash
-tar zxvf nmap-X.XX.tgz
-cd nmap-X.XX
-./configure
-make
-make install
-```
 
-3. Copy files required for the web interface
+### 2. Deploy web interface files
+
 ```bash
 mkdir /srv
 chmod 555 /srv
 cp -a <git>/root/srv/ /srv/
 ```
-4.  Install afterglow, backscatter and fifo
+
+### 3. Install backscatter, afterglow, and fifo
+
 ```bash
 cp -a <git>/root/opt/ /opt/
 ```
+
 Fetch and install afterglow from https://afterglow.sourceforge.net/
 
-5. Ensure all neccesary static routes are in place for the management interface
+### 4. Configure static routes for the management interface
+
+**RHEL7/8:** Edit and copy the route file:
 ```bash
 vi <git>/root/etc/sysconfig/network-scripts/route-ens192
 cp <git>/root/etc/sysconfig/network-scripts/route-ens192 /etc/sysconfig/network-scripts/
 ```
-6. Install sysctl configuration file for backscatter
+
+**RHEL9:** `network-scripts` has been removed. Configure routes via NetworkManager instead (use `<git>/root/etc/sysconfig/network-scripts/route-ens192` as a reference for which routes to add):
+```bash
+nmcli con mod ens192 +ipv4.routes "<destination> <gateway>"
+nmcli con up ens192
+```
+
+### 5. Apply sysctl settings
+
 ```bash
 cp <git>/root/etc/sysctl.d/zz-backscatter.conf /etc/sysctl.d/
 sysctl -p /etc/sysctl.d/zz-backscatter.conf
 ```
-7.  Install required RPM's
+
+### 6. Install dependencies
+
 ```bash
-yum -y install tcpdump lsof rcs 
-yum -y install pcre-tools perl-File-Tail perl-Net-CIDR perl-Text-CSV perl-Date-Manip 
-yum -y install nginx mariadb mariadb-server nginx nginx-mod-mail nginx-mod-http-xslt-filter nginx-all-modules nginx-filesystem nginx-mod-http-image-filter nginx-mod-http-perl nginx-mod-stream php php-fpm php-mysql php-common php-cli php-pdo
-yum -y install openssl-devel
+dnf -y install tcpdump lsof nmap pcre2-tools perl-File-Tail perl-Net-CIDR perl-Text-CSV perl-Date-Manip nginx mariadb mariadb-server nginx-mod-mail nginx-mod-http-xslt-filter nginx-all-modules nginx-filesystem nginx-mod-http-image-filter nginx-mod-http-perl nginx-mod-stream php php-fpm php-mysqlnd php-common php-cli php-pdo openssl-devel iptables-services
 ```
-8. Install the configuration file for NGINX
+
+### 7. Configure iptables
+
+All chains default to ACCEPT. Disable firewalld to avoid conflicts with iptables-services, add a logging rule for new inbound connections on the monitor interface that are not destined for the machine itself, then save the ruleset and enable the service:
+
 ```bash
-cp <git>/root/etc/nginx/nginx.conf /etc/nginx.conf
+systemctl disable --now firewalld
+iptables -A INPUT ! -d <ip-of-ens666>/32 -i ens666 -m state --state NEW -j LOG
+iptables-save > /etc/sysconfig/iptables
+systemctl enable --now iptables
 ```
-9. Create neccesary directories
+
+### 8. Configure NGINX
+
+```bash
+cp <git>/root/etc/nginx/nginx.conf /etc/nginx/nginx.conf
+```
+
+### 9. Create directories
+
 ```bash
 mkdir -p /u/backscatter/ /u/offline/ /var/spool/backscatter/scan
 chown -R scatter:scatter /u/backscatter/ /u/offline/ /var/spool/backscatter
 ```
-10. Install a sudo configuration file for backscatter 
+
+### 10. Configure sudo
+
 ```bash
 cp <git>/root/etc/sudoers.d/backscatter /etc/sudoers.d/backscatter
 ```
-11. Install a rsyslog configuration files and reload rsyslog
+
+### 11. Configure rsyslog
+
 ```bash
-cp <git>/root/etc/sudoers.d/backscatter /etc/sudoers.d/
 cp <git>/root/etc/rsyslog.d/backscatter.conf /etc/rsyslog.d/
 cp <git>/root/etc/rsyslog.d/audispd.conf /etc/rsyslog.d/
 systemctl restart rsyslog.service
 ```
 
-12. Create MySQL tables needed by backscatter
-```sql 
-mysql> create database backscatter;
-mysql> CREATE TABLE `matches` (
- `id` int(11) NOT NULL AUTO_INCREMENT,
- `proto` varchar(20) COLLATE utf8_swedish_ci DEFAULT NULL,
- `srcip` varchar(100) COLLATE utf8_swedish_ci DEFAULT NULL,
- `srcport` varchar(10) COLLATE utf8_swedish_ci DEFAULT NULL,
- `dstip` varchar(100) COLLATE utf8_swedish_ci DEFAULT NULL,
- `dstport` varchar(10) COLLATE utf8_swedish_ci DEFAULT NULL,
- `reason` varchar(255) COLLATE utf8_swedish_ci DEFAULT NULL,
- `timestamp` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
- PRIMARY KEY (`id`),
- KEY `srcip` (`srcip`,`dstip`),
- KEY `dstport` (`dstport`),
- KEY `reason` (`reason`)
-) ENGINE=MyISAM AUTO_INCREMENT=5373994 DEFAULT CHARSET=utf8 COLLATE=utf8_swedish_ci;
-mysql> CREATE TABLE `state` (
- `srcip` varchar(100) COLLATE utf8_swedish_ci NOT NULL DEFAULT '',
- `dstip` varchar(100) COLLATE utf8_swedish_ci NOT NULL DEFAULT '',
- `hits` int(20) DEFAULT NULL,
- `comment` varchar(255) COLLATE utf8_swedish_ci DEFAULT NULL,
- `timestamp` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
- PRIMARY KEY (`srcip`,`dstip`)
-) ENGINE=MyISAM DEFAULT CHARSET=utf8 COLLATE=utf8_swedish_ci;
+### 12. Configure logrotate
+
+```bash
+cp <git>/root/etc/logrotate.d/backscatter /etc/logrotate.d/
 ```
-13. Grant access to backscatter (daemon) and bracksmatter (web ui)
+
+### 13. Set up the database
+
+```bash
+mysql -u root -e "CREATE DATABASE backscatter;"
+mysql -u root backscatter < <git>/doc/create_tables.sql
+```
+
+### 14. Grant database access
+
 ```sql
-mysql> GRANT USAGE ON *.* TO 'backscatter'@'localhost' IDENTIFIED BY '<secret>';
-mysql> GRANT ALL PRIVILEGES ON `backscatter`.* TO 'backscatter'@'localhost';
-mysql> GRANT USAGE ON *.* TO 'bracksmatter'@'localhost' IDENTIFIED BY '<secret>';
-mysql> GRANT SELECT ON `backscatter`.* TO 'bracksmatter'@'localhost';
+CREATE USER 'backscatter'@'localhost' IDENTIFIED BY '<secret>';
+GRANT ALL PRIVILEGES ON `backscatter`.* TO 'backscatter'@'localhost';
+CREATE USER 'bracksmatter'@'localhost' IDENTIFIED BY '<secret>';
+GRANT SELECT ON `backscatter`.* TO 'bracksmatter'@'localhost';
 ```
-14. Install a systemd unit files and start services
+
+### 15. Configure database credentials for the backscatter daemon
+
+Create `/home/scatter/.my.cnf` with the password set in step 14, readable only by the scatter user:
+
+```bash
+cat > /home/scatter/.my.cnf << 'EOF'
+[backscatter]
+user=backscatter
+password=<secret>
+host=localhost
+EOF
+chmod 600 /home/scatter/.my.cnf
+chown scatter:scatter /home/scatter/.my.cnf
+```
+
+### 16. Configure database credentials for the web interface
+
+Create `/etc/backscatter/db.ini` outside the web root with the password set in step 14, readable only by the PHP-FPM process:
+
+```bash
+mkdir -p /etc/backscatter
+cat > /etc/backscatter/db.ini << 'EOF'
+host=localhost
+user=bracksmatter
+password=<secret>
+database=backscatter
+EOF
+chmod 640 /etc/backscatter/db.ini
+chown root:nginx /etc/backscatter/db.ini
+```
+
+### 17. Enable and start services
+
 ```bash
 cp <git>/root/etc/systemd/system/anyip-listener.service /etc/systemd/system/
 cp <git>/root/etc/systemd/system/backscatter.service /etc/systemd/system/
@@ -112,8 +172,5 @@ cp <git>/root/etc/systemd/system/report_backscatter.service /etc/systemd/system/
 cp <git>/root/etc/systemd/system/feed-routes.service /etc/systemd/system/
 cp <git>/root/etc/systemd/system/fifo.service /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable anyip-listener.service backscatter.service report_backscatter.service feed-routes.service fifo.service
-systemctl start anyip-listener.service backscatter.service report_backscatter.service feed-routes.service fifo.service
+systemctl enable --now anyip-listener.service backscatter.service report_backscatter.service feed-routes.service fifo.service
 ```
-
-

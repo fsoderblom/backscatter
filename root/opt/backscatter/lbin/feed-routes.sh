@@ -15,72 +15,282 @@
 # You should have received a copy of the GNU Affero General Public License along with
 # Backscatter. If not, see <https://www.gnu.org/licenses/>.
 #
-# feed-routes.sh: feed routes to backscatters anyip listener
+# feed-routes.sh: feed routes to backscatter AnyIP listener
 #
-# When       Who		What
-# 2020-04-20 fredrik@xpd.se	created.
+# When       Who                What
+# 2020-04-20 fredrik@xpd.se     created.
+# 2026-08-06 fredrik@xpd.se     added start, status and stop.
+
+set -u
+set -f
 
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
-PROG=$(basename $0)
-LOG_FACILITY="daemon"
+LC_ALL=C
+export PATH LC_ALL
 
-CIDR_RANGES="/opt/backscatter/etc/cidr-ranges.conf"
+PROG=${0##*/}
+LOG_FACILITY=daemon
 
-# ip route show table local
-# ip route get to 2.0.0.0
-# local 2.0.0.0 dev lo src 127.0.0.1
-#    cache <local>
-# iptables -t mangle -nvL PREROUTING
+CIDR_RANGES=/opt/backscatter/etc/cidr-ranges.conf
+TPROXY_IP=127.0.0.1
+TPROXY_PORT=1234
+
+IP=/usr/sbin/ip
+IPTABLES=/usr/sbin/iptables
 
 #
-# start of functions
+# Functions
 #
 
-info() # msg
+info()
 {
-	MSG="INFO: $1"
-	logger -t $PROG -p $LOG_FACILITY.info "$MSG"
-	echo "$MSG"
+        MSG="INFO: $1"
+        logger -t "$PROG" -p "$LOG_FACILITY.info" "$MSG"
+        printf '%s\n' "$MSG"
 }
 
-notice() # msg
+notice()
 {
-	MSG="NOTICE: $1"
-	logger -t $PROG -p $LOG_FACILITY.warn "$MSG"
-	echo "$MSG"
+        MSG="NOTICE: $1"
+        logger -t "$PROG" -p "$LOG_FACILITY.notice" "$MSG"
+        printf '%s\n' "$MSG"
 }
 
-fatal() # msg
+warning()
 {
-	MSG="FATAL: $1 (bailing out)"
-	logger -t $PROG -p $LOG_FACILITY.error "$MSG"
-	echo "$MSG"
-	exit 255
+        MSG="WARNING: $1"
+        logger -t "$PROG" -p "$LOG_FACILITY.warning" "$MSG"
+        printf '%s\n' "$MSG" >&2
+}
+
+fatal()
+{
+        MSG="FATAL: $1 (bailing out)"
+        logger -t "$PROG" -p "$LOG_FACILITY.err" "$MSG"
+        printf '%s\n' "$MSG" >&2
+        exit 1
+}
+
+usage()
+{
+        printf 'Usage: %s {start|status|stop}\n' "$PROG" >&2
+        exit 2
+}
+
+valid_ipv4_cidr()
+{
+        awk -v cidr="$1" 'BEGIN {
+                if (split(cidr, part, "/") != 2 ||
+                    part[2] !~ /^[0-9]+$/ ||
+                    part[2] < 0 || part[2] > 32 ||
+                    split(part[1], octet, ".") != 4) {
+                        exit 1
+                }
+
+                for (i = 1; i <= 4; i++) {
+                        if (octet[i] !~ /^[0-9]+$/ ||
+                            octet[i] < 0 || octet[i] > 255) {
+                                exit 1
+                        }
+                }
+
+                exit 0
+        }'
+}
+
+route_present()
+{
+        "$IP" -o -4 route show table local 2>/dev/null |
+                awk -v net="$1" '
+                        $1 == "local" {
+                                prefix = $2
+
+                                # iproute2 may display a host route
+                                # without an explicit /32.
+                                if (prefix !~ /\//) {
+                                        prefix = prefix "/32"
+                                }
+
+                                if (prefix == net) {
+                                        for (i = 1; i <= NF; i++) {
+                                                if ($i == "dev" &&
+                                                    $(i + 1) == "lo") {
+                                                        found = 1
+                                                }
+                                        }
+                                }
+                        }
+
+                        END {
+                                exit(found ? 0 : 1)
+                        }
+                '
+}
+
+iptables_rule_present()
+{
+        "$IPTABLES" -t mangle -C PREROUTING \
+                -d "$1" \
+                -p tcp \
+                -j TPROXY \
+                --on-port "$TPROXY_PORT" \
+                --on-ip "$TPROXY_IP" \
+                >/dev/null 2>&1
+}
+
+start_range()
+{
+        NET=$1
+
+        if route_present "$NET"; then
+                notice "$NET: local route already present."
+        else
+                "$IP" -4 route add table local local "$NET" \
+                        dev lo src "$TPROXY_IP" ||
+                        fatal "$NET: failed to add local route."
+
+                info "$NET: local route added."
+        fi
+
+        if iptables_rule_present "$NET"; then
+                notice "$NET: mangle PREROUTING rule already present."
+        else
+                "$IPTABLES" -t mangle -I PREROUTING \
+                        -d "$NET" \
+                        -p tcp \
+                        -j TPROXY \
+                        --on-port "$TPROXY_PORT" \
+                        --on-ip "$TPROXY_IP" ||
+                        fatal "$NET: failed to add mangle PREROUTING rule."
+
+                info "$NET: mangle PREROUTING rule added."
+        fi
+}
+
+stop_range()
+{
+        NET=$1
+        RULE_REMOVED=0
+
+        # Remove all matching rules in case an older run
+        # accidentally created duplicates.
+        while iptables_rule_present "$NET"; do
+                "$IPTABLES" -t mangle -D PREROUTING \
+                        -d "$NET" \
+                        -p tcp \
+                        -j TPROXY \
+                        --on-port "$TPROXY_PORT" \
+                        --on-ip "$TPROXY_IP" ||
+                        fatal "$NET: failed to remove mangle PREROUTING rule."
+
+                RULE_REMOVED=1
+        done
+
+        if [ "$RULE_REMOVED" -eq 1 ]; then
+                info "$NET: mangle PREROUTING rule removed."
+        else
+                notice "$NET: no mangle PREROUTING rule present."
+        fi
+
+        if route_present "$NET"; then
+                "$IP" -4 route del table local local "$NET" dev lo src "$TPROXY_IP" ||
+                        fatal "$NET: failed to remove local route."
+
+                info "$NET: local route removed."
+        else
+                notice "$NET: no local route present."
+        fi
+}
+
+status_range()
+{
+        NET=$1
+        ROUTE_STATUS=missing
+        RULE_STATUS=missing
+
+        if route_present "$NET"; then
+                ROUTE_STATUS=present
+        else
+                STATUS_RC=3
+        fi
+
+        if iptables_rule_present "$NET"; then
+                RULE_STATUS=present
+        else
+                STATUS_RC=3
+        fi
+
+        printf '%-18s route: %-7s  tproxy: %s\n' \
+                "$NET" "$ROUTE_STATUS" "$RULE_STATUS"
 }
 
 #
-# end of functions - start of main
+# Main
 #
 
-if [ ! -f $CIDR_RANGES ]; then
-	fatal "ERROR: "
-	exit 1
-fi
+[ "$#" -eq 1 ] || usage
+ACTION=$1
 
-for NET in $(grep -vE "^#" $CIDR_RANGES | awk ' { print $1 } ')
-do
-	if [ $(/usr/sbin/ip route get to $NET | grep -c "dev lo") -lt 1 ]; then
-		/usr/sbin/ip route add local $NET dev lo src 127.0.0.1
-		info "$NET: local route added."
-	else
-		notice "Local route for $NET already inserted."
-	fi
+case "$ACTION" in
+        start|status|stop)
+                ;;
+        *)
+                usage
+                ;;
+esac
 
-	if [ $(/usr/sbin/iptables -t mangle -nL PREROUTING | grep -c " $NET ") -lt 1 ]; then
-		/usr/sbin/iptables -t mangle -I PREROUTING -d $NET -p tcp -j TPROXY --on-port=1234 --on-ip=127.0.0.1
-		info "$NET: mangle prerouting entry added."
-	else
-		notice "Mangle prerouting rule for $NET already inserted."
-	fi
-done
-exit 0
+[ "$(id -u)" -eq 0 ] ||
+        fatal "Must be run as root."
+
+[ -r "$CIDR_RANGES" ] ||
+        fatal "Cannot read $CIDR_RANGES."
+
+[ -x "$IP" ] ||
+        fatal "$IP is not executable."
+
+[ -x "$IPTABLES" ] ||
+        fatal "$IPTABLES is not executable."
+
+STATUS_RC=0
+RANGE_COUNT=0
+LINE_NUMBER=0
+
+while IFS= read -r LINE || [ -n "$LINE" ]; do
+        LINE_NUMBER=$((LINE_NUMBER + 1))
+
+        # Remove full-line and trailing comments.
+        LINE=${LINE%%#*}
+
+        # Use the first whitespace-separated field as the CIDR range.
+        set -- $LINE
+        [ "$#" -gt 0 ] || continue
+
+        NET=$1
+
+        if ! valid_ipv4_cidr "$NET"; then
+                warning \
+                        "$CIDR_RANGES:$LINE_NUMBER: invalid IPv4 CIDR: $NET"
+
+                STATUS_RC=2
+                continue
+        fi
+
+        RANGE_COUNT=$((RANGE_COUNT + 1))
+
+        case "$ACTION" in
+                start)
+                        start_range "$NET"
+                        ;;
+                status)
+                        status_range "$NET"
+                        ;;
+                stop)
+                        stop_range "$NET"
+                        ;;
+        esac
+done < "$CIDR_RANGES"
+
+[ "$RANGE_COUNT" -gt 0 ] ||
+        fatal "No valid CIDR ranges found in $CIDR_RANGES."
+
+exit "$STATUS_RC"

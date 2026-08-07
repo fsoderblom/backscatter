@@ -17,10 +17,12 @@
 #
 # backscatter - monitor backscatter and pick out source ip on possibly offending hosts.
 #
-# backscatter created "semaphores" in /var/spool/backscatter, each semaphore is named
-# according to the offending source ip. report_backscatter regulary reads /var/spool/backscatter
-# and for each found file it greps out the 10 last entries from the logfile and mails a report
-# to a (hopefully) concerned sysadmin.
+# backscatter creates semaphores in /var/spool/backscatter named after the offending
+# source IP. report_backscatter regularly polls /var/spool/backscatter and for each
+# found semaphore runs an optional nmap scan, fetches the last 100 database entries,
+# generates an Afterglow graph, and writes a timestamped report and graph to
+# /u/backscatter/<srcip>/ (a SAN/shared volume accessible by the SOC team).
+# A local6.error syslog alert is fired for SIEM consumption via alerts.log.
 #
 # When       Who            What
 # 2020-05-18 fredrik@xpd.se Added 13.96.0.0/13 to MSFT ranges.
@@ -52,6 +54,7 @@ use Net::CIDR;
 my $verbose = 1;
 
 my %hash;
+my %last_seen;
 my %alert;
 
 my $line;
@@ -86,10 +89,11 @@ sub get_state {
 	my @data;
 	my $counter = 0;
 	print "Restoring state - " if $verbose;
-	my $sth = $dbh->prepare("SELECT srcip, dstip, hits FROM state");
+	my $sth = $dbh->prepare("SELECT srcip, dstip, hits, UNIX_TIMESTAMP(last_seen) FROM state");
 	$sth->execute;
 	while (@data = $sth->fetchrow_array()) {
 		$hash{$data[0]}{$data[1]} = $data[2];
+		$last_seen{$data[0]}{$data[1]} = $data[3];
 		$counter++;
 	}
 	print "done ($counter state/s restored)\n" if $verbose;
@@ -104,7 +108,7 @@ sub save_state {
 	my $rhash = \%hash;
 	foreach my $srcip (sort keys %$rhash) {
 	        foreach my $dstip (keys %{$rhash->{ $srcip }}) {
-			$sql = "REPLACE INTO state (srcip, dstip, hits) VALUES('" . $srcip . "', '" . $dstip . "', '" . $rhash->{ $srcip }{ $dstip } . "')";
+			$sql = "REPLACE INTO state (srcip, dstip, hits, last_seen) VALUES('" . $srcip . "', '" . $dstip . "', '" . $rhash->{ $srcip }{ $dstip } . "', FROM_UNIXTIME(" . ($last_seen{$srcip}{$dstip} // time()) . "))";
 			$counter++;
 			$dbh->do($sql);
 			print "$sql\n" if ($verbose >= 10);
@@ -141,7 +145,9 @@ sub int_handler {
 
 #
 # Initiate DB connection
-$dbh = DBI->connect('dbi:mysql:backscatter','backscatter','p5nA4UAb59JbwBF') or die "Connection Error: $DBI::errstr\n";
+$dbh = DBI->connect('dbi:mysql:backscatter', undef, undef,
+    { mysql_read_default_file  => '/home/scatter/.my.cnf',
+      mysql_read_default_group => 'backscatter' }) or die "Connection Error: $DBI::errstr\n";
 
 # Setup interrupt handlers
 %SIG = (
@@ -322,6 +328,7 @@ while (defined($line=$file->read))
 		$hash{$srcip}{$dstip} = 1;
 		print "CANDIDATE (new pattern): $srcip:$srcport -> $dstip:$dstport\n" if ($verbose >= 2);
 	}
+	$last_seen{$srcip}{$dstip} = time();
 
 	# dampening
 	my $rhash = \%hash;

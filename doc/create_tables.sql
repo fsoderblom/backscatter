@@ -18,7 +18,7 @@ CREATE TABLE state (
   dstip varchar(100) NOT NULL DEFAULT '',
   hits int(20) DEFAULT NULL,
   comment varchar(255) DEFAULT NULL,
-  timestamp timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  last_seen timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (srcip,dstip)
 ) ENGINE=MyISAM DEFAULT CHARSET=utf8 COLLATE=utf8_swedish_ci;
 

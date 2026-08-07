@@ -1,0 +1,16 @@
+/var/log/iptables.log
+/var/log/alert.log
+/var/log/backscatter.log {
+    rotate 52
+    weekly
+    compress
+    dateext
+    missingok
+    notifempty
+    create 0600 scatter scatter
+    sharedscripts
+
+    postrotate
+        /usr/bin/systemctl kill -s HUP rsyslog.service >/dev/null 2>&1 || true
+    endscript
+}

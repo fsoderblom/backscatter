@@ -6,6 +6,7 @@
 import socket
 import struct
 import syslog
+import sys
 
 IP_TRANSPARENT = 19
 

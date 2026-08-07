@@ -1,10 +1,15 @@
 [Unit]
-Description=feed-routes
-After=network.target anyip-listener.service
+Description=Install backscatter AnyIP routes and TPROXY rules
+Wants=iptables.service anyip-listener.service
+After=network.target iptables.service anyip-listener.service
 
 [Service]
 Type=oneshot
-ExecStart=/opt/backscatter/lbin/feed-routes.sh
+RemainAfterExit=yes
+ExecStart=/opt/backscatter/lbin/feed-routes.sh start
+ExecStop=/opt/backscatter/lbin/feed-routes.sh stop
+TimeoutStartSec=5min
+TimeoutStopSec=5min
 
 [Install]
 WantedBy=multi-user.target

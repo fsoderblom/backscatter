@@ -1,12 +1,16 @@
 [Unit]
-Description=anyip-listener
+Description=Backscatter AnyIP listener
 After=network.target
 
 [Service]
 Type=simple
-Restart=on-failure
 ExecStart=/opt/backscatter/sbin/anyip-listener.py
-ExecStop=/bin/kill -TERM $MAINPID
+
+Restart=on-failure
+RestartSec=2s
+
+TimeoutStopSec=30s
+KillSignal=SIGTERM
 
 [Install]
 WantedBy=multi-user.target
