@@ -89,6 +89,27 @@ systemctl enable --now iptables
 cp <git>/root/etc/nginx/nginx.conf /etc/nginx/nginx.conf
 ```
 
+Create the TLS directory and install your server certificate and key:
+
+```bash
+mkdir -p /etc/nginx/tls
+cp server.crt /etc/nginx/tls/
+cp server.key /etc/nginx/tls/
+chmod 600 /etc/nginx/tls/server.key
+```
+
+Generate a DH parameter file (this takes a few minutes):
+
+```bash
+openssl dhparam -out /etc/nginx/tls/dhparam.pem 4096
+```
+
+The following are optional but recommended — edit `nginx.conf` to enable them:
+
+- **mTLS** — install your client CA certificate as `/etc/nginx/tls/client-ca.pem`, then uncomment `ssl_verify_client on` and the `if ($ssl_client_verify != SUCCESS)` block in the `location /` stanza to restrict access to certificate-holding clients only.
+- **OCSP stapling** — uncomment `ssl_stapling`, `ssl_stapling_verify`, and `resolver`, replacing `DNS1 DNS2` with your internal resolvers.
+- **HSTS** — uncomment the `Strict-Transport-Security` header once TLS is confirmed working.
+
 ### 9. Create directories
 
 ```bash
