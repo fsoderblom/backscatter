@@ -45,7 +45,7 @@ cp -a <git>/root/srv/ /srv/
 cp -a <git>/root/opt/ /opt/
 ```
 
-Fetch and install afterglow from https://afterglow.sourceforge.net/
+Clone and install afterglow from https://github.com/fsoderblom/afterglow — the color.properties configuration files for backscatter are included in this repo under `root/opt/afterglow/etc/` and will be copied into place by the `cp -a` command above.
 
 Before starting services, review and edit the following files:
 
@@ -77,7 +77,7 @@ sysctl -p /etc/sysctl.d/zz-backscatter.conf
 ### 6. Install dependencies
 
 ```bash
-dnf -y install tcpdump lsof nmap pcre2-tools perl-File-Tail perl-Net-CIDR perl-Text-CSV perl-Date-Manip nginx mariadb mariadb-server nginx-mod-mail nginx-mod-http-xslt-filter nginx-all-modules nginx-filesystem nginx-mod-http-image-filter nginx-mod-http-perl nginx-mod-stream php php-fpm php-mysqlnd php-common php-cli php-pdo openssl-devel iptables-services
+dnf -y install tcpdump lsof nmap graphviz pcre2-tools perl-File-Tail perl-Net-CIDR perl-Text-CSV perl-Date-Manip nginx mariadb mariadb-server nginx-mod-mail nginx-mod-http-xslt-filter nginx-all-modules nginx-filesystem nginx-mod-http-image-filter nginx-mod-http-perl nginx-mod-stream php php-fpm php-mysqlnd php-common php-cli php-pdo openssl-devel iptables-services
 ```
 
 ### 7. Configure iptables
