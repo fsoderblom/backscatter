@@ -144,14 +144,20 @@ systemctl restart rsyslog.service
 cp <git>/root/etc/logrotate.d/backscatter /etc/logrotate.d/
 ```
 
-### 13. Set up the database
+### 13. Enable and start MariaDB
+
+```bash
+systemctl enable --now mariadb
+```
+
+### 14. Set up the database
 
 ```bash
 mysql -u root -e "CREATE DATABASE backscatter;"
 mysql -u root backscatter < <git>/doc/create_tables.sql
 ```
 
-### 14. Grant database access
+### 15. Grant database access
 
 ```sql
 CREATE USER 'backscatter'@'localhost' IDENTIFIED BY '<secret>';
@@ -160,7 +166,7 @@ CREATE USER 'bracksmatter'@'localhost' IDENTIFIED BY '<secret>';
 GRANT SELECT ON `backscatter`.* TO 'bracksmatter'@'localhost';
 ```
 
-### 15. Configure database credentials for the backscatter daemon
+### 16. Configure database credentials for the backscatter daemon
 
 Create `/home/scatter/.my.cnf` with the password set in step 14, readable only by the scatter user:
 
@@ -175,7 +181,7 @@ chmod 600 /home/scatter/.my.cnf
 chown scatter:scatter /home/scatter/.my.cnf
 ```
 
-### 16. Configure database credentials for the web interface
+### 17. Configure database credentials for the web interface
 
 Create `/etc/backscatter/db.ini` outside the web root with the password set in step 14, readable only by the PHP-FPM process:
 
@@ -191,7 +197,7 @@ chmod 640 /etc/backscatter/db.ini
 chown root:nginx /etc/backscatter/db.ini
 ```
 
-### 17. Enable and start services
+### 18. Enable and start services
 
 ```bash
 cp <git>/root/etc/systemd/system/anyip-listener.service /etc/systemd/system/
