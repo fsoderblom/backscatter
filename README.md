@@ -23,6 +23,8 @@ The web interface provides search and filtering of the `matches` database, After
 
 ## Installation
 
+Throughout these steps `<git>` refers to the root of your local clone of this repository.
+
 ### 1. Create a dedicated user
 
 ```bash
@@ -44,6 +46,12 @@ cp -a <git>/root/opt/ /opt/
 ```
 
 Fetch and install afterglow from https://afterglow.sourceforge.net/
+
+Before starting services, review and edit the following files:
+
+- **`/opt/backscatter/sbin/report_backscatter`** — set `MAIL_TO` to the address that should receive alerts when the SAN share is unavailable.
+- **`/opt/backscatter/sbin/backscatter`** — review the filtering section and replace the example `srcip/me` whitelist entry with your own exclusions.
+- **`/opt/backscatter/etc/cidr-ranges.conf`** — pre-populated with all public IPv4 space; trim to match only the ranges actually routed to ens666.
 
 ### 4. Configure static routes for the management interface
 
@@ -114,7 +122,7 @@ Once the configuration is in place, verify and enable NGINX:
 
 ```bash
 nginx -t
-systemctl enable --now nginx
+systemctl enable --now nginx php-fpm
 ```
 
 ### 9. Create directories
@@ -148,6 +156,7 @@ cp <git>/root/etc/logrotate.d/backscatter /etc/logrotate.d/
 
 ```bash
 systemctl enable --now mariadb
+mysql_secure_installation
 ```
 
 ### 14. Set up the database

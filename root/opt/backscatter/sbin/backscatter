@@ -203,8 +203,8 @@ while (defined($line=$file->read))
 	# source ip
 	#
 
-	# 10.163.0.35 that's me :)
-	if ($srcip =~ /^10\.163\.0\.35$/) {
+	# FIXME: replace with the management IP of this host
+	if ($srcip =~ /^10\.1\.2\.3$/) {
 		$reason = "srcip/me" unless $reason;
 	}
 
