@@ -41,7 +41,7 @@ function gethost($ip)
   }
   ?>
   <br>
-  <?php echo "$ip is $srchost"; ?>
+  <?php echo htmlspecialchars($ip) . " is " . htmlspecialchars($srchost); ?>
 </body>
 
 </html>

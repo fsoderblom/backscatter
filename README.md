@@ -50,8 +50,9 @@ Clone and install afterglow from https://github.com/fsoderblom/afterglow — the
 Before starting services, review and edit the following files:
 
 - **`/opt/backscatter/sbin/report_backscatter`** — set `MAIL_TO` to the address that should receive alerts when the SAN share is unavailable.
-- **`/opt/backscatter/sbin/backscatter`** — review the filtering section and replace the example `srcip/me` whitelist entry with your own exclusions.
+- **`/opt/backscatter/sbin/backscatter`** — review the filtering section (whitelisting itself is now data-driven, see step 14 below).
 - **`/opt/backscatter/etc/cidr-ranges.conf`** — pre-populated with all public IPv4 space; trim to match only the ranges actually routed to ens666.
+- **`/opt/backscatter/etc/cidr-ranges-testing.conf`** — a small set of documentation/benchmarking ranges (RFC 5737 `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24` and the RFC 2544 benchmarking range `198.18.0.0/15`) for exercising the pipeline end-to-end without routing real corporate traffic to ens666. `feed-routes.sh` always reads `cidr-ranges.conf`, so to use the testing set, point the `CIDR_RANGES` variable at the top of `/opt/backscatter/lbin/feed-routes.sh` at it (or symlink it into place) until you're ready to switch to the production ranges.
 
 ### 4. Configure static routes for the management interface
 
@@ -164,25 +165,35 @@ mysql_secure_installation
 ```bash
 mysql -u root -e "CREATE DATABASE backscatter;"
 mysql -u root backscatter < <git>/doc/create_tables.sql
+mysql -u root backscatter < <git>/doc/backscatter-whitelist-bootstrap.sql
 ```
+
+The bootstrap file must be loaded before starting the `backscatter` service — it seeds `whitelist_rules`/`whitelist_cidrs`/`whitelist_port_predicates` with the known-good destinations (CDNs, Microsoft, Cloudflare, Webex, Akamai, NTP, etc.) referenced in [How it works](#how-it-works). Without it, the whitelist is empty and every non-matched connection will be treated as a candidate. Review its contents and adjust to your environment (in particular the `srcip/me` rule, which ships with a placeholder `10.1.2.3/32`) before or after loading it.
 
 ### 15. Grant database access
 
-```sql
-CREATE USER 'backscatter'@'localhost' IDENTIFIED BY '<secret>';
-GRANT ALL PRIVILEGES ON `backscatter`.* TO 'backscatter'@'localhost';
-CREATE USER 'bracksmatter'@'localhost' IDENTIFIED BY '<secret>';
-GRANT SELECT ON `backscatter`.* TO 'bracksmatter'@'localhost';
+Use `<git>/doc/grants.sql` as a reference (edit the passwords first):
+
+```bash
+vi <git>/doc/grants.sql
+mysql -u root < <git>/doc/grants.sql
 ```
+
+This grants `backscatter`@`localhost` only `SELECT`/`INSERT`/`DELETE` on `matches` and `state` plus `SELECT` on the whitelist tables (what the daemon and `purge_backscatter.pl` need — no `ALL PRIVILEGES`), and grants `bracksmatter`@`localhost` read-only `SELECT` on the whole schema for the web interface.
 
 ### 16. Configure database credentials for the backscatter daemon
 
-Create `/home/scatter/.my.cnf` with the password set in step 14, readable only by the scatter user:
+Create `/home/scatter/.my.cnf` with the passwords set in step 15, readable only by the scatter user. It holds two stanzas: `[backscatter]` for the daemon and `purge_backscatter.pl`, and `[whitelist]` for `whitelist_ctl.pl` (step 20):
 
 ```bash
 cat > /home/scatter/.my.cnf << 'EOF'
 [backscatter]
 user=backscatter
+password=<secret>
+host=localhost
+
+[whitelist]
+user=whitelist
 password=<secret>
 host=localhost
 EOF
@@ -192,7 +203,7 @@ chown scatter:scatter /home/scatter/.my.cnf
 
 ### 17. Configure database credentials for the web interface
 
-Create `/etc/backscatter/db.ini` outside the web root with the password set in step 14, readable only by the PHP-FPM process:
+Create `/etc/backscatter/db.ini` outside the web root with the password set in step 15, readable only by the PHP-FPM process:
 
 ```bash
 mkdir -p /etc/backscatter
@@ -217,3 +228,35 @@ cp <git>/root/etc/systemd/system/fifo.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now anyip-listener.service backscatter.service report_backscatter.service feed-routes.service fifo.service
 ```
+
+### 19. Enable database trimming
+
+`/opt/backscatter/lbin/purge_backscatter.pl` deletes old rows from `state` and `matches` (see `--help` for options) and reuses the same `/home/scatter/.my.cnf` credentials as the daemon. Install and enable its daily timer:
+
+```bash
+cp <git>/root/etc/systemd/system/purge-backscatter.service /etc/systemd/system/
+cp <git>/root/etc/systemd/system/purge-backscatter.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now purge-backscatter.timer
+```
+
+The default retention (`--state-days 90 --matches-days 45`) is set in `purge-backscatter.service`; adjust it there to match how long the SOC team needs history to remain queryable.
+
+### 20. Manage whitelist entries
+
+`/opt/backscatter/lbin/whitelist_ctl.pl` adds, edits, enables/disables and deletes rows in `whitelist_rules`/`whitelist_cidrs`/`whitelist_port_predicates` (the tables seeded by step 14) without needing to hand-write SQL. It connects using the `[whitelist]` stanza from step 16, validates CIDRs/ports/priorities before writing, and can check a candidate rule against sample traffic before it goes live:
+
+```bash
+# List current rules
+sudo -u scatter /opt/backscatter/lbin/whitelist_ctl.pl list
+
+# Add a rule and reload the running daemon so it takes effect immediately
+sudo -u scatter /opt/backscatter/lbin/whitelist_ctl.pl add \
+    --reason 'srcip/me' --src-cidr 10.1.2.3/32 --reload
+
+# Check which rule (if any) a given packet would match, without adding anything
+sudo -u scatter /opt/backscatter/lbin/whitelist_ctl.pl test \
+    --proto TCP --srcip 10.1.2.4 --srcport 51000 --dstip 2.249.46.160 --dstport 443
+```
+
+Run `whitelist_ctl.pl --help` for the full command list (`show`, `edit`, `enable`, `disable`, `delete`). `--reload` shells out to `sudo systemctl reload backscatter.service`, which sends the daemon a `SIGHUP` to reload its whitelist without restarting (and without losing in-memory state); this requires the sudoers rule installed in step 10.

@@ -24,6 +24,9 @@ while True:
     c, (r_ip, r_port) = s.accept()
     l_ip, l_port = c.getsockname()
     syslog.syslog("[ ] Connection from tcp://%s:%d to tcp://%s:%d" % (r_ip, r_port, l_ip, l_port))
+    # A client that never reads its socket buffer can otherwise block send()
+    # forever and stall the single-threaded accept loop for everyone else.
+    c.settimeout(5)
     try:
         c.send(b"captured in backscatter. contact soc for more information.\n")
     except OSError as e:

@@ -32,8 +32,10 @@ if ($action == "Reset") {
   $lines   = get_argument('lines');
 }
 
-// Correct default value
-if ($lines == 0 || $lines == "") {
+// Restrict $lines to the values offered in the <select> below; it is later
+// concatenated into the SQL LIMIT clause, which cannot use a bound parameter.
+$valid_lines = array("50", "100", "200", "500", "1000", "2000", "5000", "10000", "none");
+if (!in_array((string)$lines, $valid_lines, true)) {
   $lines = 200;
 }
 
@@ -62,16 +64,16 @@ include "./functions.inc.php";
     <h1>backscatter</h1><br>
     <section class="inputs">
       <label for="srcip"><span class="title">source ip</span>
-        <input type="text" id="srcip" name="srcip" value="<?php echo $srcip; ?>" />
+        <input type="text" id="srcip" name="srcip" value="<?php echo htmlspecialchars($srcip); ?>" />
       </label>
       <label for="srcport"><span class="title">source port</span>
-        <input type="text" id="srcport" name="srcport" value="<?php echo $srcport; ?>" />
+        <input type="text" id="srcport" name="srcport" value="<?php echo htmlspecialchars($srcport); ?>" />
       </label>
       <label for="" dstip><span class="title">destination ip</span>
-        <input type="text" id="dstip" name="dstip" value="<?php echo $dstip; ?>" />
+        <input type="text" id="dstip" name="dstip" value="<?php echo htmlspecialchars($dstip); ?>" />
       </label>
       <label for="" dstport><span class="title">destination port</span>
-        <input type="text" id="dstport" name="dstport" value="<?php echo $dstport; ?>" />
+        <input type="text" id="dstport" name="dstport" value="<?php echo htmlspecialchars($dstport); ?>" />
       </label>
     </section>
 
@@ -391,10 +393,10 @@ include "./functions.inc.php";
             } else {
               $srcProps = "href=\"$WHOIS$r_srcip&targetnic=auto\" target=\"whois\"";
             }
-            if (preg_match($regexLocalIp, $r_destip)) {
-              $dstProps = "href=\"$LWHOIS$r_destip\" target=\"ip\" onClick=\"window.open('','ip','width=300,height=100')\"";
+            if (preg_match($regexLocalIp, $r_dstip)) {
+              $dstProps = "href=\"$LWHOIS$r_dstip\" target=\"ip\" onClick=\"window.open('','ip','width=300,height=100')\"";
             } else {
-              $dstProps = "href=\"$WHOIS$r_destip&targetnic=auto\" target=\"whois\"";
+              $dstProps = "href=\"$WHOIS$r_dstip&targetnic=auto\" target=\"whois\"";
             }
           ?>
             <!-- Source -->

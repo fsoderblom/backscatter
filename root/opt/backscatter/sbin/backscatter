@@ -72,7 +72,6 @@ my $dstip;
 my $dstport;
 
 my $dbh;
-my $sql;
 my @whitelist;
 my $hits;
 my $reason;
@@ -174,13 +173,16 @@ sub save_state {
 		$dbh = $dbh->clone() or die "cannot connect to db";
 	}
 	print "Saving state - " if $verbose;
+	my $sth = $dbh->prepare(q{
+		REPLACE INTO state (srcip, dstip, hits, last_seen) VALUES (?, ?, ?, FROM_UNIXTIME(?))
+	});
 	my $rhash = \%hash;
 	foreach my $srcip (sort keys %$rhash) {
 	        foreach my $dstip (keys %{$rhash->{ $srcip }}) {
-			$sql = "REPLACE INTO state (srcip, dstip, hits, last_seen) VALUES('" . $srcip . "', '" . $dstip . "', '" . $rhash->{ $srcip }{ $dstip } . "', FROM_UNIXTIME(" . ($last_seen{$srcip}{$dstip} // time()) . "))";
+			my $seen = $last_seen{$srcip}{$dstip} // time();
+			$sth->execute($srcip, $dstip, $rhash->{ $srcip }{ $dstip }, $seen);
 			$counter++;
-			$dbh->do($sql);
-			print "$sql\n" if ($verbose >= 10);
+			print "REPLACE INTO state (srcip, dstip, hits, last_seen) VALUES ('$srcip', '$dstip', '" . $rhash->{ $srcip }{ $dstip } . "', FROM_UNIXTIME($seen))\n" if ($verbose >= 10);
 	        }
 	}
 	print "done ($counter state/s saved)\n" if $verbose;

@@ -1,0 +1,12 @@
+[Unit]
+Description=Backscatter database purge
+After=mariadb.service
+Requires=mariadb.service
+
+[Service]
+Type=oneshot
+User=scatter
+Group=scatter
+ExecStart=/opt/backscatter/lbin/purge_backscatter.pl --state-days 90 --matches-days 45
+StandardOutput=syslog
+SyslogFacility=local4
